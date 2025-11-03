@@ -8,7 +8,35 @@ app.use(cors());
 
 const port = process.env.PORT || 3001;
 
+// Get all apps from developer
+app.get('/api/apps', async (req, res) => {
+    try {
+        const DEVELOPER_ID = '6256207236238699098';
+        console.log('Fetching apps for developer:', DEVELOPER_ID);
 
+        const apps = await gplay.developer({
+            devId: DEVELOPER_ID,
+            num: 50,
+            lang: 'en',
+            country: 'us'
+        });
+
+        console.log(`Successfully fetched ${apps.length} apps`);
+
+        res.json({
+            success: true,
+            data: apps
+        });
+    } catch (error) {
+        console.error('Error fetching apps:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Get specific apps by IDs
 app.get('/', async (req, res) => {
     try {
         const appIds = req.query.appIds.split(',');

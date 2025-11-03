@@ -39,6 +39,16 @@ app.get('/api/apps', async (req, res) => {
 // Get specific apps by IDs
 app.get('/', async (req, res) => {
     try {
+        if (!req.query.appIds) {
+            return res.status(400).json({
+                error: 'Missing required parameter: appIds',
+                usage: 'GET /?appIds=com.example.app1,com.example.app2',
+                endpoints: {
+                    getAllApps: '/api/apps'
+                }
+            });
+        }
+
         const appIds = req.query.appIds.split(',');
         const appDetailsPromises = appIds.map(appId => gplay.app({ appId }));
         const appDetailsArray = await Promise.all(appDetailsPromises);

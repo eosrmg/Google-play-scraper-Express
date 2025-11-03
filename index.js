@@ -24,13 +24,21 @@ app.get('/api/apps', async (req, res) => {
 
         console.log(`Found ${basicApps.length} apps, fetching detailed information...`);
 
-        // Fetch detailed information for each app
-        const detailedAppsPromises = basicApps.map(app =>
-            gplay.app({ appId: app.appId })
-        );
+        // Fetch detailed information for each app with error handling
+        const detailedAppsPromises = basicApps.map(async (basicApp) => {
+            try {
+                const detailedApp = await gplay.app({ appId: basicApp.appId });
+                return detailedApp;
+            } catch (error) {
+                console.error(`Failed to fetch details for ${basicApp.appId}:`, error.message);
+                // Return basic app info if detailed fetch fails
+                return basicApp;
+            }
+        });
+
         const detailedApps = await Promise.all(detailedAppsPromises);
 
-        console.log(`Successfully fetched detailed info for ${detailedApps.length} apps`);
+        console.log(`Successfully processed ${detailedApps.length} apps`);
 
         res.json({
             success: true,

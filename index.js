@@ -1,4 +1,4 @@
-import gplay from 'google-play-scraper';
+import { app as fetchApp, developer } from '@mradex77/google-play-scraper';
 import express from 'express';
 import cors from 'cors';
 import cache from './cache.js';
@@ -67,7 +67,7 @@ const withTimeout = (promise, ms) =>
 const fetchAppDetails = async (basicApp) => {
     try {
         const detailedApp = await withTimeout(
-            gplay.app({ appId: basicApp.appId }),
+            fetchApp({ appId: basicApp.appId }),
             APP_DETAIL_TIMEOUT
         );
         return { ...basicApp, ...detailedApp };
@@ -98,11 +98,10 @@ const batchFetchDetails = async (basicApps, batchSize = BATCH_SIZE) => {
     return results;
 };
 
-// Fetch and cache a complete developer list. google-play-scraper handles
-// continuation tokens internally; don't wrap this paginated request in a
-// short timeout, which can discard the later pages and leave an old cache.
+// Fetch and cache a developer list. The replacement scraper follows developer
+// continuation pages up to MAX_APPS; don't add a short overall timeout here.
 const fetchAndCacheApps = async () => {
-    const basicApps = await gplay.developer({
+    const basicApps = await developer({
         devId: DEVELOPER_ID,
         num: MAX_APPS,
         lang: 'en',
@@ -234,7 +233,7 @@ app.get('/', async (req, res) => {
 
         const appIds = req.query.appIds.split(',');
         const appDetailsPromises = appIds.map(appId =>
-            withTimeout(gplay.app({ appId }), 5000)
+            withTimeout(fetchApp({ appId }), 5000)
         );
         const appDetailsArray = await Promise.all(appDetailsPromises);
 

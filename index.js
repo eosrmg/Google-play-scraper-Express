@@ -12,7 +12,7 @@ const port = process.env.PORT || 3001;
 // Configuration
 const DEVELOPER_ID = '6256207236238699098';
 const CACHE_KEY = 'developer_apps';
-const CACHE_TTL = 3600; // 1 hour in seconds
+const CACHE_TTL = 300; // 5 minutes in seconds
 const MAX_APPS = 50;
 const APP_DETAIL_TIMEOUT = 5000; // 5 seconds per app detail fetch
 const BATCH_SIZE = 5; // Fetch details in batches to avoid overwhelming Google Play
@@ -55,10 +55,10 @@ const extractShortSummary = (text) => {
 };
 
 // Helper function with timeout
-const withTimeout = (promise, ms) => 
+const withTimeout = (promise, ms) =>
     Promise.race([
         promise,
-        new Promise((_, reject) => 
+        new Promise((_, reject) =>
             setTimeout(() => reject(new Error(`Timeout after ${ms}ms`)), ms)
         )
     ]);
@@ -81,60 +81,76 @@ const fetchAppDetails = async (basicApp) => {
 // Helper function to batch fetch with concurrency control
 const batchFetchDetails = async (basicApps, batchSize = BATCH_SIZE) => {
     const results = [];
-    
+
     for (let i = 0; i < basicApps.length; i += batchSize) {
         const batch = basicApps.slice(i, i + batchSize);
         const batchResults = await Promise.all(
             batch.map(app => fetchAppDetails(app))
         );
         results.push(...batchResults);
-        
+
         // Small delay between batches to avoid rate limiting
         if (i + batchSize < basicApps.length) {
             await new Promise(resolve => setTimeout(resolve, 500));
         }
     }
-    
+
     return results;
+};
+
+// Fetch and cache a complete developer list. google-play-scraper handles
+// continuation tokens internally; don't wrap this paginated request in a
+// short timeout, which can discard the later pages and leave an old cache.
+const fetchAndCacheApps = async () => {
+    const basicApps = await gplay.developer({
+        devId: DEVELOPER_ID,
+        num: MAX_APPS,
+        lang: 'en',
+        country: 'us'
+    });
+
+    // Guard against duplicates returned across continuation pages.
+    const uniqueApps = [...new Map(
+        basicApps.filter(app => app?.appId).map(app => [app.appId, app])
+    ).values()];
+
+    console.log(`Found ${basicApps.length} apps (${uniqueApps.length} unique), fetching details...`);
+
+    // Each detail request has its own timeout. Avoid a short overall timeout
+    // here: a full list is processed in batches and can take longer than 8s.
+    const apps = await batchFetchDetails(uniqueApps);
+    console.log(`Successfully processed ${apps.length} apps`);
+
+    const appsWithSubtitle = apps.map(app => ({
+        title: app.title || 'Unknown',
+        summary: extractShortSummary(app.summary || ''),
+        appId: app.appId,
+        icon: app.icon,
+        score: app.score || 0,
+        scoreText: app.scoreText || '0.0',
+        installs: app.installs || 'N/A',
+        price: app.price || 0,
+        free: app.free !== undefined ? app.free : true,
+        developer: app.developer || 'Unknown',
+        url: app.url,
+        screenshots: app.screenshots || []
+    }));
+
+    const cachedData = {
+        apps: appsWithSubtitle,
+        timestamp: new Date().toISOString(),
+        count: appsWithSubtitle.length
+    };
+    cache.set(CACHE_KEY, cachedData, CACHE_TTL);
+
+    return cachedData;
 };
 
 // Helper function to refresh cache in background
 const refreshCacheInBackground = async () => {
     try {
         console.log('Background: Fetching fresh app data...');
-        const basicApps = await gplay.developer({
-            devId: DEVELOPER_ID,
-            num: MAX_APPS,
-            lang: 'en',
-            country: 'us'
-        });
-
-        console.log(`Background: Found ${basicApps.length} apps, fetching details...`);
-
-        const apps = await batchFetchDetails(basicApps);
-        console.log(`Background: Successfully processed ${apps.length} apps`);
-
-        const appsWithSubtitle = apps.map(app => ({
-            title: app.title || 'Unknown',
-            summary: extractShortSummary(app.summary || ''),
-            appId: app.appId,
-            icon: app.icon,
-            score: app.score || 0,
-            scoreText: app.scoreText || '0.0',
-            installs: app.installs || 'N/A',
-            price: app.price || 0,
-            free: app.free !== undefined ? app.free : true,
-            developer: app.developer || 'Unknown',
-            url: app.url,
-            screenshots: app.screenshots || []
-        }));
-
-        cache.set(CACHE_KEY, {
-            apps: appsWithSubtitle,
-            timestamp: new Date().toISOString(),
-            count: appsWithSubtitle.length
-        }, CACHE_TTL);
-
+        await fetchAndCacheApps();
         console.log('Background: Cache updated successfully');
     } catch (error) {
         console.error('Background: Error refreshing cache:', error.message);
@@ -144,20 +160,20 @@ const refreshCacheInBackground = async () => {
 // Get all apps from developer with caching
 app.get('/api/apps', async (req, res) => {
     try {
-        // Try to get from cache first
+        const forceRefresh = ['1', 'true'].includes(String(req.query.refresh).toLowerCase());
         const cachedData = cache.get(CACHE_KEY);
-        
-        if (cachedData) {
+
+        if (cachedData && !forceRefresh) {
             console.log('Returning cached data');
-            
+
             // If cache is getting stale, refresh in background
             if (cache.isStale(CACHE_KEY, CACHE_TTL)) {
                 console.log('Cache is stale, refreshing in background...');
-                refreshCacheInBackground().catch(err => 
+                refreshCacheInBackground().catch(err =>
                     console.error('Background refresh error:', err)
                 );
             }
-            
+
             return res.json({
                 success: true,
                 data: cachedData.apps,
@@ -167,60 +183,19 @@ app.get('/api/apps', async (req, res) => {
             });
         }
 
-        // Cache miss - fetch fresh data (with timeout)
-        console.log('Cache miss, fetching fresh data...');
-        
-        const basicApps = await withTimeout(
-            gplay.developer({
-                devId: DEVELOPER_ID,
-                num: MAX_APPS,
-                lang: 'en',
-                country: 'us'
-            }),
-            8000  // 8 seconds for initial developer list fetch
-        );
-
-        console.log(`Found ${basicApps.length} apps, fetching details...`);
-
-        const apps = await withTimeout(
-            batchFetchDetails(basicApps),
-            8000  // 8 seconds for all detail fetches
-        );
-
-        console.log(`Successfully processed ${apps.length} apps`);
-
-        const appsWithSubtitle = apps.map(app => ({
-            title: app.title || 'Unknown',
-            summary: extractShortSummary(app.summary || ''),
-            appId: app.appId,
-            icon: app.icon,
-            score: app.score || 0,
-            scoreText: app.scoreText || '0.0',
-            installs: app.installs || 'N/A',
-            price: app.price || 0,
-            free: app.free !== undefined ? app.free : true,
-            developer: app.developer || 'Unknown',
-            url: app.url,
-            screenshots: app.screenshots || []
-        }));
-
-        // Cache the result
-        cache.set(CACHE_KEY, {
-            apps: appsWithSubtitle,
-            timestamp: new Date().toISOString(),
-            count: appsWithSubtitle.length
-        }, CACHE_TTL);
+        console.log(forceRefresh ? 'Force refresh requested...' : 'Cache miss, fetching fresh data...');
+        const freshData = await fetchAndCacheApps();
 
         res.json({
             success: true,
-            data: appsWithSubtitle,
+            data: freshData.apps,
             cached: false,
-            timestamp: new Date().toISOString(),
-            count: appsWithSubtitle.length
+            timestamp: freshData.timestamp,
+            count: freshData.count
         });
     } catch (error) {
         console.error('Error fetching apps:', error.message);
-        
+
         // Try to return stale cache as fallback
         const staleCache = cache.get(CACHE_KEY);
         if (staleCache) {
@@ -235,7 +210,7 @@ app.get('/api/apps', async (req, res) => {
                 note: 'Returning cached data from previous successful request'
             });
         }
-        
+
         res.status(503).json({
             success: false,
             error: error.message,
@@ -258,7 +233,7 @@ app.get('/', async (req, res) => {
         }
 
         const appIds = req.query.appIds.split(',');
-        const appDetailsPromises = appIds.map(appId => 
+        const appDetailsPromises = appIds.map(appId =>
             withTimeout(gplay.app({ appId }), 5000)
         );
         const appDetailsArray = await Promise.all(appDetailsPromises);
